@@ -4,10 +4,10 @@ library(data.table)
 library(rstan)
 
 # select state
-state_sel <- 'PA'
+state_sel <- 'WI'
 
 # directory
-base_directory <- 'C:/Projects/Post Election'
+base_directory <- 'C:/data/tmp/exit_polls_2016'
   
 # file paths
 acs_loc <- './ACS Data'
@@ -16,6 +16,10 @@ res2012_loc <- './County Results/Results 2012'
 res2016_loc <- './County Results/Results 2016'
 exit_loc <- './Exit Polls'
 turnout_loc <- './Benchmark Turnout'
+
+# stan options
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
 
 # define inv-logit function
 inv_logit <- function(x) 1 / (1 + exp(-x))
@@ -28,7 +32,6 @@ setwd(base_directory)
 setwd(acs_loc)
 acs <- fread('acs_county.csv', colClasses = 'char')
 acs[, perwt := as.numeric(perwt) / 100]
-acs[, sex := as.integer(sex)]
 acs[, educ_sel := as.integer(educ_sel)]
 acs[, year := as.integer(year)]
 rm(acs_loc)
@@ -104,7 +107,7 @@ res[, ballots := NULL]
 # selected demographics
 ep_sel <- ep[question_id_mapped %in% c(260, 917, 1951) 
              & name_party %in% c('democrat', 'total')]
-ep_sel[, value := as.numeric(value)]
+suppressWarnings(ep_sel[, value := as.numeric(value)])
 ep_sel[category == '$100K or More', category := '$100K or more']
 ep_sel[category == 'Less Than $100K', category := 'Under $100K']
 ep_sel <-
@@ -260,9 +263,9 @@ f_exit_poll_est <- function(state_sel, year_sel) {
          , J_max = stan_dat[, max(j)]
          , J = stan_dat[, .(J = uniqueN(j)), k][order(k), J]
          , wt = wt[, wt_fit]
-         , lookup = wt[, paste('j', 1:K, sep = ''), with = FALSE]
-         , y = y
-         , obs = obs)
+         , lookup = as.matrix(wt[, paste('j', 1:K, sep = ''), with = FALSE])
+         , y = as.matrix(y)
+         , obs = as.matrix(obs))
   
   setwd(base_directory)
   
@@ -320,10 +323,7 @@ f_state_fit <- function(state_sel) {
                                  , dem]
   theta_prior_votes <- ifelse(theta_prior_votes > .995, .995, theta_prior_votes)
   
-  # larger prior sd for demographic cells with less population
-  obs_pcnt <- apply(dat$obs, c(2, 3), sum) / apply(dat$obs, 3, sum)
-  dat$theta_prior_sd <- ifelse(obs_pcnt < .03,  .125, .05)
-  dat$theta_prior_sd_votes <- ifelse(obs_pcnt < .03,  .125, .05)
+  
   
   yr <- 2
   N <- res[state == state_sel & year == 2016, uniqueN(fips)]
@@ -331,8 +331,15 @@ f_state_fit <- function(state_sel) {
   obs <- array(obs[, perwt], dim = c(N, K, yr))
   theta_prior <- array(theta_prior, dim = c(K, yr))
   theta_prior_votes <- array(theta_prior_votes, dim = c(K, yr))
-  prior_sd <- array(prior_sd, dim = c(K, yr))
+  theta_prior_sd <- theta_prior
+  theta_prior_sd_votes <- theta_prior_votes
   
+  # larger prior sd for demographic cells with less population
+  obs_pcnt <- apply(obs, c(2, 3), sum) / apply(obs, 3, sum)
+  theta_prior_sd <- ifelse(obs_pcnt < .03,  .125, .05)
+  theta_prior_sd_votes <- ifelse(obs_pcnt < .03,  .125, .05)
+  
+
   dat <- 
     list(N = N
          , K = K
@@ -341,17 +348,18 @@ f_state_fit <- function(state_sel) {
          , obs = obs
          , votes = array(round(votes), dim = c(N, yr))
          , theta_prior = theta_prior
-         , theta_prior_sd = prior_sd
+         , theta_prior_sd = theta_prior_sd
          , theta_prior_votes = theta_prior_votes
-         , theta_prior_sd_votes = prior_sd)
+         , theta_prior_sd_votes = theta_prior_sd_votes)
   
   rstan_options(auto_write = TRUE)
   options(mc.cores = parallel::detectCores())
   
   state_fit <- stan(file = 'latent_binomial_approx.stan'
-                    , data = dat, iter = 4000, chains = 4)
+                    , data = dat, iter = 4000, chains = 4
+                    , control = list(adapt_delta = .9))
   
-  list(dat = dat, fit = state_fit)
+  list(dat = dat, state_fit = state_fit)
 }
 
 # loop through and fit each state
@@ -368,7 +376,8 @@ for (s in state.abb) {
            , SIMPLIFY = FALSE)
   ep_priors <- do.call('rbind', ep_priors)
   fit <- f_state_fit(s)
-  a <- extract(fit$state_fit)
+  a <- fit$state_fit
+  a <- extract(a)
   tbl <- data.table(melt(a$theta_adj))
   setnames(tbl, c('Var2', 'Var3'), c('param', 'yr'))
   tbl[, var := 'theta_adj']
@@ -380,6 +389,7 @@ for (s in state.abb) {
   tbl_sims <- rbind(tbl, tbl_sims)
   rm(tbl2, a, tbl)
   save(fit, file = paste('./Model Fits/', s, '.rdata', sep = ''))
+  fwrite(tbl_sims,  './Model Fits/model_sims.csv')
 }
 
 
