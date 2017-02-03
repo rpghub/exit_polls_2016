@@ -269,17 +269,11 @@ f_exit_poll_est <- function(state_sel, year_sel) {
   
   setwd(base_directory)
   
-  if (!exists('fit')) {
-    fit <<- stan(file = 'demographics.stan', data = dat, iter = 4000
-                 , chains = 4
-                 , control = list(adapt_delta = .98))
-    fit1 <- fit
-  } else {
-    fit1 <- stan(fit = fit, data = dat, iter = 4000
-                 , chains = 4
-                 , control = list(adapt_delta = .98))
-  }
-  a <- extract(fit1)
+  fit_priors <- stan(file = 'demographics.stan', data = dat, iter = 4000
+                      , chains = 4
+                      , control = list(adapt_delta = .98))
+
+  a <- extract(fit_priors)
   wt[, turnout := votes_state * wt_fit / perwt]
   wt[, dem := apply(a$beta, 2, mean)]
   wt[, .(year, state, educ_sel, inc_sel, race_sel, wt = wt_fit, turnout,  dem)]
@@ -370,11 +364,12 @@ tbl_sims <- data.table(iterations = 1
                        , var = 'theta_adj'
                        , state = 'xx')
 tbl_sims <- tbl_sims[state != 'xx']
-for (s in state.abb) {
+for (s in 'CA') { #state.abb
   ep_priors <- 
     mapply(f_exit_poll_est, state_sel = s, year_sel = c(2016, 2012)
            , SIMPLIFY = FALSE)
   ep_priors <- do.call('rbind', ep_priors)
+  ep_priors[race_sel != 'white', dem := weighted.mean(dem, wt), .(year, race_sel)]
   fit <- f_state_fit(s)
   a <- fit$state_fit
   a <- extract(a)
@@ -389,7 +384,7 @@ for (s in state.abb) {
   tbl_sims <- rbind(tbl, tbl_sims)
   rm(tbl2, a, tbl)
   save(fit, file = paste('./Model Fits/', s, '.rdata', sep = ''))
-  fwrite(tbl_sims,  './Model Fits/model_sims.csv')
+  #fwrite(tbl_sims,  './Model Fits/model_sims.csv')
 }
 
 
