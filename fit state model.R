@@ -4,7 +4,7 @@ library(data.table)
 library(rstan)
 
 # select state
-state_sel <- 'WI'
+selected_states <- c('MN', 'PA', 'OH', 'WI', 'MI')
 
 # directory
 base_directory <- 'C:/data/tmp/exit_polls_2016'
@@ -103,7 +103,6 @@ res[, state_votes := NULL]
 res[, ballots := NULL]
 
 # exit poll estimates ----
-
 # selected demographics
 ep_sel <- ep[question_id_mapped %in% c(260, 917, 1951) 
              & name_party %in% c('democrat', 'total')]
@@ -111,14 +110,22 @@ suppressWarnings(ep_sel[, value := as.numeric(value)])
 ep_sel[category == '$100K or More', category := '$100K or more']
 ep_sel[category == 'Less Than $100K', category := 'Under $100K']
 ep_sel <-
-  dcast.data.table(ep_sel
-                   , year + state + category + respondents 
-                   + question_id_mapped + question ~ name_party
-                   , value.var = 'value')
+dcast.data.table(ep_sel
+                 , year + state + category + respondents
+                 + question_id_mapped + question ~ name_party
+                 , value.var = 'value')
 setkey(ep_sel, state)
 setkey(state_region, state)
 ep_sel <- state_region[ep_sel]
-
+# add states that are not in exit poll data
+ep_sel_full <- ep_sel[, .(.N), .(year, category, question_id_mapped)]
+ep_sel_full <- ep_sel_full[, .(state = state_region[, state]
+                               , region = state_region[, region])
+                           , .(year, category, question_id_mapped)]
+setkey(ep_sel_full, state, region, year, category, question_id_mapped)
+setkey(ep_sel, state, region, year, category, question_id_mapped)
+ep_sel <- ep_sel[ep_sel_full]
+rm(ep_sel_full)
 # credibility weight exit poll data
 ep_sel[total <= 5, cred := .25]
 ep_sel[between(total, 6, 10), cred := .50]
@@ -144,31 +151,30 @@ ep_sel[category == 'Under $100K', category := '0' ]
 ep_sel[category == 'no', category := '0' ]
 ep_sel[category == 'yes', category := '1' ]
 
-
 # acs data for turnout
 acs[, state_abbr := substr(cntyname, nchar(cntyname) - 1, nchar(cntyname))]
 acs[race_sel == 'hispanic', race_sel := 'latino']
-acs_state <- 
-  acs[year %in% c(2015, 2012, 2008)
-      , .(perwt = round(sum(perwt)))
-      , .(year, race_sel
-          , educ_sel = as.integer(educ_sel)
-          , inc_sel = as.integer(inc_sel)
-          , state = state_abbr)]
+acs_state <-
+acs[year %in% c(2015, 2012, 2008)
+    , .(perwt = round(sum(perwt)))
+    , .(year, race_sel
+    , educ_sel = as.integer(educ_sel)
+    , inc_sel = as.integer(inc_sel)
+    , state = state_abbr)]
 acs_state[year == 2015, year := 2016]
 acs_state[, educ_sel := as.character(educ_sel)]
 acs_state[, inc_sel := as.character(inc_sel)]
-
 cols <- c('educ_sel', 'inc_sel', 'race_sel')
-acs_state_agg <- 
-  lapply(cols, function(c) {
-    setnames(acs_state, c, 'sel_sel')
-    tmp <- 
-      acs_state[, .(perwt = sum(perwt), cat = c)
-                , .(year, state, category = sel_sel)]
-    setnames(acs_state, 'sel_sel', c)
-    tmp
-  })
+acs_state_agg <-
+lapply(cols, function(c) {
+setnames(acs_state, c, 'sel_sel')
+tmp <-
+acs_state[, .(perwt = sum(perwt), cat = c)
+, .(year, state, category = sel_sel)]
+setnames(acs_state, 'sel_sel', c)
+tmp
+})
+
 acs_state_agg <- do.call('rbind', acs_state_agg)
 acs_state_agg[cat == 'educ_sel', question_id_mapped := '1951']
 acs_state_agg[cat == 'race_sel', question_id_mapped := '260']
@@ -182,6 +188,19 @@ res_state <- res[, .(votes = sum(votes_adj)), .(state, year)]
 setkey(res_state, state, year)
 setkey(ep_sel, state, year)
 ep_sel <- res_state[ep_sel]
+
+# use regional turnout and acs state population to fill totals for
+# states without exit poll data
+ep_sel[, turnout_region := sum(total * votes / 100, na.rm = TRUE) /
+         sum(ifelse(is.na(total), NA, perwt), na.rm = TRUE)
+       , .(year, region, cat, category)]
+ep_sel[turnout_region > 1, turnout_region := 1]
+ep_sel[is.na(total), total := turnout_region * perwt /
+         sum(turnout_region * perwt) * 1E2
+       , .(state, year, cat)]
+ep_sel[, turnout_region := NULL]
+
+# get vote totals
 ep_sel[, votes_total := votes * total / 100]
 ep_sel[votes_total > perwt, votes_total := perwt]
 ep_sel[, votes_dem := votes_total * democrat_cred / 100]
@@ -364,12 +383,13 @@ tbl_sims <- data.table(iterations = 1
                        , var = 'theta_adj'
                        , state = 'xx')
 tbl_sims <- tbl_sims[state != 'xx']
-for (s in 'CA') { #state.abb
+for (s in selected_states) { 
   ep_priors <- 
     mapply(f_exit_poll_est, state_sel = s, year_sel = c(2016, 2012)
            , SIMPLIFY = FALSE)
   ep_priors <- do.call('rbind', ep_priors)
-  ep_priors[race_sel != 'white', dem := weighted.mean(dem, wt), .(year, race_sel)]
+  ep_priors[race_sel != 'white', dem := weighted.mean(dem, wt)
+            , .(year, race_sel)]
   fit <- f_state_fit(s)
   a <- fit$state_fit
   a <- extract(a)
@@ -384,7 +404,7 @@ for (s in 'CA') { #state.abb
   tbl_sims <- rbind(tbl, tbl_sims)
   rm(tbl2, a, tbl)
   save(fit, file = paste('./Model Fits/', s, '.rdata', sep = ''))
-  #fwrite(tbl_sims,  './Model Fits/model_sims.csv')
+  fwrite(tbl_sims,  './Model Fits/model_sims.csv')
 }
 
 
