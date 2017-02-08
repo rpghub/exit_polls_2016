@@ -23,6 +23,7 @@ options(mc.cores = parallel::detectCores())
 
 # define inv-logit function
 inv_logit <- function(x) 1 / (1 + exp(-x))
+logit <- function(x) log(x / (1 - x))
 
 # create state to region map
 state_region <- data.table(state = state.abb, region = state.region)
@@ -229,99 +230,70 @@ ep_sel[, votes_total := votes * total / 100]
 ep_sel[votes_total > perwt, votes_total := perwt]
 ep_sel[, votes_dem := votes_total * democrat_cred / 100]
 
-# exit polls by cell for state and year
-f_exit_poll_est <- function(state_sel, year_sel) {
-  stan_dat <- ep_sel[state == state_sel & year == year_sel]
-  stan_dat[, k := .GRP, question_id_mapped]
-  stan_dat[, j := seq_len(.N), question_id_mapped]
-  stan_dat[, votes_dem := round(votes_dem)]
-  stan_dat[, votes_total := round(votes_total)]
-  wt <- 
-    stan_dat[, .(k, j, category, wt = total / 100
-                 , dummy = 1)]
-  
-  K <- wt[, uniqueN(k)]
-  wt_cross <- wt[k == K]
-  for (i in (K-1):1) {
-    wt_join <- wt[k == i]
-    setkey(wt_join, dummy)
-    setkey(wt_cross, dummy)
-    wt_cross <- wt_join[wt_cross, allow.cartesian = TRUE][i.k != k]
-    wt_cross[, wt := wt * i.wt]
-    setnames(wt_cross, c('i.k', 'i.j', 'i.wt', 'i.category')
-             , paste(c('k', 'j', 'wt', 'cat'), i + 1, sep = ''))
-  }
-  setnames(wt_cross, c('j', 'category'), c('j1', 'cat1'))
-  cols <- paste(rep(c('j', 'cat'), each = 3), 1:K, sep = '')
-  cols <- c('wt', cols)
-  wt <- wt_cross[, cols, with = FALSE]
-  rm(wt_join, wt_cross)
-  cols <- ncol(wt)
-  
-  wt[, state := state_sel]
-  wt[, year := year_sel]
-  setkey(wt, year, state, cat1, cat2, cat3)
-  setkey(acs_state, year, state, educ_sel, race_sel, inc_sel)
-  wt <- acs_state[wt]
-  wt[, wt := perwt / sum(perwt)]
-  wt[, votes_state := round(stan_dat[1, votes])]
-  wt[, wt_lim := perwt / votes_state]
-  
-  y <- dcast.data.table(stan_dat, k ~ j, value.var = 'votes_dem'
-                        , fill = 0)
-  y[, k := NULL]
+# priors base on race adjusted for education and income
+ep_priors <- 
+  ep_sel[cat == 'race_sel', .(state, year, race_sel = category
+                              , democrat_cred = democrat_cred / 100
+                              , turnout = votes * total / perwt / 100)]
+setkey(ep_priors, state, year, race_sel)
+setkey(acs_state, state, year, race_sel)
+ep_priors <- acs_state[ep_priors]
 
-  obs <- dcast.data.table(stan_dat, k ~ j, value.var = 'votes_total'
-                        , fill = 0)
-  obs[, k := NULL]
-  
-  tot <- dcast.data.table(stan_dat, k ~ j, value.var = 'perwt'
-                          , fill = 0)
-  tot[, k := NULL]
-  
-  
-  f_wt <- function(x) {
-    wt[, wt_fit := x / sum(x)]
-    fit1 <- wt[, .(wt_fit = sum(wt_fit), cat = 'educ_sel')
-               , .(category = educ_sel)]
-    fit2 <- wt[, .(wt_fit = sum(wt_fit), cat = 'inc_sel')
-               , .(category = inc_sel)]
-    fit3 <- wt[, .(wt_fit = sum(wt_fit), cat = 'race_sel')
-               , .(category = race_sel)]
-    fit <- rbind(fit1, fit2, fit3)
-    setkey(fit, cat, category)
-    setkey(stan_dat, cat, category)
-    stan_dat[fit, sum((total / 100 - wt_fit)^2)]
-  }
-  
+# get relative votes by education
+ep_sel_educ <- 
+  ep_sel[cat == 'educ_sel', .(state, year, educ_sel = category
+                              , perwt
+                              , democrat_cred_educ = democrat_cred / 100
+                              , turnout_educ = votes * total / perwt / 100)]
+ep_sel_educ[turnout_educ > .99, turnout_educ := .99]
+ep_sel_educ[democrat_cred_educ > .99, democrat_cred_educ := .99]
+ep_sel_educ[, democrat_cred_educ := democrat_cred_educ / 
+              weighted.mean(democrat_cred_educ, turnout_educ * perwt)
+            , .(year, state)]
+ep_sel_educ[, turnout_educ := turnout_educ / 
+              weighted.mean(turnout_educ, perwt)
+            , .(year, state)]
+ep_sel_educ[, perwt := NULL]
+setkey(ep_priors, state, year, educ_sel)
+setkey(ep_sel_educ, state, year, educ_sel)
+ep_priors <- ep_sel_educ[ep_priors]
 
-  wt_fits <- optim(wt[, wt], f_wt, lower = 0, upper = wt[, wt_lim]
-                   , method = 'L-BFGS-B')
-  wt[, wt_fit := wt_fits$par]
+# get relative votes by income
+ep_sel_inc <- 
+  ep_sel[cat == 'inc_sel', .(state, year, perwt, inc_sel = category
+                              , democrat_cred_inc = democrat_cred / 100
+                              , turnout_inc = votes * total / perwt / 100)]
+ep_sel_inc[turnout_inc > .99, turnout_inc := .99]
+ep_sel_inc[democrat_cred_inc > .99, democrat_cred_inc := .99]
+ep_sel_inc[, democrat_cred_inc := democrat_cred_inc / 
+              weighted.mean(democrat_cred_inc, turnout_inc * perwt)
+            , .(year, state)]
+ep_sel_inc[, turnout_inc := turnout_inc / 
+              weighted.mean(turnout_inc, perwt)
+            , .(year, state)]
+ep_sel_inc[, perwt := NULL]
 
-  dat <- 
-    list(N  = nrow(stan_dat)
-         , K = stan_dat[, uniqueN(k)]
-         , N_cells = nrow(wt)
-         , J_max = stan_dat[, max(j)]
-         , J = stan_dat[, .(J = uniqueN(j)), k][order(k), J]
-         , wt = wt[, wt_fit]
-         , lookup = as.matrix(wt[, paste('j', 1:K, sep = ''), with = FALSE])
-         , y = as.matrix(y)
-         , obs = as.matrix(obs))
-  
-  setwd(base_directory)
-  
-  fit_priors <- stan(file = 'demographics.stan', data = dat, iter = 4000
-                      , chains = 4
-                      , control = list(adapt_delta = .98))
-
-  a <- extract(fit_priors)
-  wt[, turnout := votes_state * wt_fit / perwt]
-  wt[, dem := apply(a$beta, 2, mean)]
-  wt[, .(year, state, educ_sel, inc_sel, race_sel, wt = wt_fit, turnout,  dem)]
-}
-
+# adjust white votes by education and income relative vote shares
+# use unadjusted percentages by race for all other races
+setkey(ep_priors, state, year, inc_sel)
+setkey(ep_sel_inc, state, year, inc_sel)
+ep_priors <- ep_sel_inc[ep_priors]
+ep_priors[is.na(democrat_cred_inc), democrat_cred_inc := 1]
+ep_priors[is.na(turnout_inc), turnout_inc := 1]
+ep_priors[race_sel == 'white', democrat_cred := 
+            democrat_cred * democrat_cred_inc * democrat_cred_educ]
+ep_priors[race_sel == 'white', turnout := 
+            turnout * turnout_inc * turnout_educ]
+ep_priors[turnout > .99, turnout := .99]
+ep_priors[democrat_cred > .99, democrat_cred := .99]
+ep_priors[turnout < .01, turnout := .01]
+ep_priors[democrat_cred < .01, democrat_cred := .01]
+ep_priors <- 
+  ep_priors[, .(year, state, educ_sel, inc_sel, race_sel
+                , wt = perwt * turnout
+                , turnout,  dem = democrat_cred)]
+ep_priors[, wt := wt / sum(wt), .(state, year)]
+rm(ep_sel_educ, ep_sel_inc)
 
 # function to fit state model
 f_state_fit <- function(state_sel) {
@@ -352,13 +324,14 @@ f_state_fit <- function(state_sel) {
   obs[, perwt := round(perwt)]
   setkey(obs, year, category, county)
   
-  theta_prior <- ep_priors[order(year, educ_sel, inc_sel, race_sel)
+  theta_prior <- ep_priors[state == state_sel
+                           ][order(year, educ_sel, inc_sel, race_sel)
                            , turnout]
-  theta_prior <- ifelse(theta_prior > .995, .995, theta_prior)
   
-  theta_prior_votes <- ep_priors[order(year, educ_sel, inc_sel, race_sel)
+  theta_prior_votes <- ep_priors[state == state_sel
+                                 ][order(year, educ_sel, inc_sel, race_sel)
                                  , dem]
-  theta_prior_votes <- ifelse(theta_prior_votes > .995, .995, theta_prior_votes)
+
   
   
   
@@ -373,8 +346,8 @@ f_state_fit <- function(state_sel) {
   
   # larger prior sd for demographic cells with less population
   obs_pcnt <- apply(obs, c(2, 3), sum) / apply(obs, 3, sum)
-  theta_prior_sd <- ifelse(obs_pcnt < .03,  .125, .05)
-  theta_prior_sd_votes <- ifelse(obs_pcnt < .03,  .125, .05)
+  theta_prior_sd <- ifelse(obs_pcnt < .03,  .2, .1)
+  theta_prior_sd_votes <- ifelse(obs_pcnt < .03,  .2, .1)
   
 
   dat <- 
@@ -399,14 +372,9 @@ f_state_fit <- function(state_sel) {
   list(dat = dat, state_fit = state_fit)
 }
 
+setwd(base_directory)
 # loop through and fit each state
 for (s in selected_states) { 
-  ep_priors <- 
-    mapply(f_exit_poll_est, state_sel = s, year_sel = c(2016, 2012)
-           , SIMPLIFY = FALSE)
-  ep_priors <- do.call('rbind', ep_priors)
-  ep_priors[race_sel != 'white', dem := weighted.mean(dem, wt)
-            , .(year, race_sel)]
   fit <- f_state_fit(s)
   a <- fit$state_fit
   a <- extract(a)
