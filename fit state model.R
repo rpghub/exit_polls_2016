@@ -4,7 +4,7 @@ library(data.table)
 library(rstan)
 
 # select state
-selected_states <- c('MN', 'PA', 'OH', 'WI', 'MI')
+selected_states <- c('MI', 'IL', 'IA', 'VA', 'NY')
 
 # directory
 base_directory <- 'C:/data/tmp/exit_polls_2016'
@@ -101,6 +101,30 @@ res[, adj := ballots / state_votes]
 res[, votes_adj := votes * adj]
 res[, state_votes := NULL]
 res[, ballots := NULL]
+
+# adjust for bedford county city which changed fips
+tmp <-
+  res[fips %in% c('51515', '51019')
+      , .(votes = sum(votes)
+          , votes_adj = sum(votes_adj)
+          , adj = sum(votes_adj) / sum(votes)
+          , county = 'BEDFORD CO'
+          , fips = 51019
+          , percent_complete = 100)
+      , .(state, year, abbr_state, candidate, party)]
+tmp[, percent_won := votes_adj / sum(votes_adj), year]
+res <- rbind(res[!(fips %in% c('51515', '51019'))], tmp)
+rm(tmp)
+
+tmp <-
+  acs[county %in% c('51515', '51019')
+      , .(perwt = sum(perwt)
+          , cntyname = 'Bedford VA'
+          , county = '51019')
+      , .(state, year, educ_sel, race_sel, inc_sel)]
+acs <- rbind(acs[!(county %in% c('51515', '51019'))], tmp)
+rm(tmp)
+
 
 # exit poll estimates ----
 # selected demographics
@@ -376,13 +400,6 @@ f_state_fit <- function(state_sel) {
 }
 
 # loop through and fit each state
-tbl_sims <- data.table(iterations = 1
-                       , param = 1
-                       , yr = 1
-                       , value = 1.0
-                       , var = 'theta_adj'
-                       , state = 'xx')
-tbl_sims <- tbl_sims[state != 'xx']
 for (s in selected_states) { 
   ep_priors <- 
     mapply(f_exit_poll_est, state_sel = s, year_sel = c(2016, 2012)
@@ -394,17 +411,25 @@ for (s in selected_states) {
   a <- fit$state_fit
   a <- extract(a)
   tbl <- data.table(melt(a$theta_adj))
-  setnames(tbl, c('Var2', 'Var3'), c('param', 'yr'))
-  tbl[, var := 'theta_adj']
+  setnames(tbl, c('Var2', 'Var3', 'value'), c('param', 'yr', 'theta_adj'))
   tbl2 <- data.table(melt(a$theta_votes_adj))
-  setnames(tbl2, c('Var2', 'Var3'), c('param', 'yr'))
-  tbl2[, var := 'theta_votes_adj']
-  tbl <- rbind(tbl, tbl2)
+  setnames(tbl2, c('Var2', 'Var3', 'value'), c('param', 'yr', 'theta_votes_adj'))
+  setkey(tbl, iterations, param, yr)
+  setkey(tbl2, iterations, param, yr)
+  tbl <- tbl2[tbl]
   tbl[, state := s]
-  tbl_sims <- rbind(tbl, tbl_sims)
-  rm(tbl2, a, tbl)
+  obs <- apply(fit$dat$obs, c(2, 3), sum)
+  obs <- as.data.table(melt(obs))
+  setnames(obs, c('param', 'yr', 'perwt'))
+  setkey(obs, param, yr)
+  setkey(tbl, param, yr)
+  tbl <- obs[tbl]
   save(fit, file = paste('./Model Fits/', s, '.rdata', sep = ''))
-  fwrite(tbl_sims,  './Model Fits/model_sims.csv')
+  fwrite(tbl,  paste('./Model Fits/', s, '.csv', sep = ''))
+  print(s)
+  print(fit$state_fit, pars = 'theta_votes_adj[5,2]')
+  rm(tbl2, a, tbl, obs, fit, ep_priors)
+  gc()
 }
 
 
