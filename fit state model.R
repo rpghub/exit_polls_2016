@@ -4,11 +4,11 @@ library(data.table)
 library(rstan)
 
 # select state
-selected_states <- c('MI', 'IL', 'IA', 'VA', 'NY')
+selected_states <- 'ID'  #setdiff(state.abb, c('HI', 'AK', 'ID', 'AL'))
 
 # directory
 base_directory <- 'C:/data/tmp/exit_polls_2016'
-  
+
 # file paths
 acs_loc <- './ACS Data'
 res2008_loc <- './County Results/Results 2008'
@@ -135,13 +135,14 @@ suppressWarnings(ep_sel[, value := as.numeric(value)])
 ep_sel[category == '$100K or More', category := '$100K or more']
 ep_sel[category == 'Less Than $100K', category := 'Under $100K']
 ep_sel <-
-dcast.data.table(ep_sel
-                 , year + state + category + respondents
-                 + question_id_mapped + question ~ name_party
-                 , value.var = 'value')
+  dcast.data.table(ep_sel
+                   , year + state + category + respondents
+                   + question_id_mapped + question ~ name_party
+                   , value.var = 'value')
 setkey(ep_sel, state)
 setkey(state_region, state)
 ep_sel <- state_region[ep_sel]
+
 # add states that are not in exit poll data
 ep_sel_full <- ep_sel[, .(.N), .(year, category, question_id_mapped)]
 ep_sel_full <- ep_sel_full[, .(state = state_region[, state]
@@ -151,6 +152,7 @@ setkey(ep_sel_full, state, region, year, category, question_id_mapped)
 setkey(ep_sel, state, region, year, category, question_id_mapped)
 ep_sel <- ep_sel[ep_sel_full]
 rm(ep_sel_full)
+
 # credibility weight exit poll data
 ep_sel[total <= 5, cred := .25]
 ep_sel[between(total, 6, 10), cred := .50]
@@ -180,25 +182,32 @@ ep_sel[category == 'yes', category := '1' ]
 acs[, state_abbr := substr(cntyname, nchar(cntyname) - 1, nchar(cntyname))]
 acs[race_sel == 'hispanic', race_sel := 'latino']
 acs_state <-
-acs[year %in% c(2015, 2012, 2008)
-    , .(perwt = round(sum(perwt)))
-    , .(year, race_sel
-    , educ_sel = as.integer(educ_sel)
-    , inc_sel = as.integer(inc_sel)
-    , state = state_abbr)]
+  acs[year %in% c(2015, 2012, 2008)
+      , .(perwt = round(sum(perwt)))
+      , .(year, race_sel
+          , educ_sel = as.integer(educ_sel)
+          , inc_sel = as.integer(inc_sel)
+          , state = state_abbr)]
+acs_full <- acs_state[, .N, .(year, race_sel, educ_sel, inc_sel)]
+acs_full <- acs_full[, .(state = acs_state[, unique(state)])
+                     , .(year, race_sel, educ_sel, inc_sel)]
+setkey(acs_full, year, race_sel, educ_sel, inc_sel, state)
+setkey(acs_state, year, race_sel, educ_sel, inc_sel, state)
+acs_state <- acs_state[acs_full]
+acs_state[is.na(perwt), perwt := 1L]
 acs_state[year == 2015, year := 2016]
 acs_state[, educ_sel := as.character(educ_sel)]
 acs_state[, inc_sel := as.character(inc_sel)]
 cols <- c('educ_sel', 'inc_sel', 'race_sel')
 acs_state_agg <-
-lapply(cols, function(c) {
-setnames(acs_state, c, 'sel_sel')
-tmp <-
-acs_state[, .(perwt = sum(perwt), cat = c)
-, .(year, state, category = sel_sel)]
-setnames(acs_state, 'sel_sel', c)
-tmp
-})
+  lapply(cols, function(c) {
+    setnames(acs_state, c, 'sel_sel')
+    tmp <-
+      acs_state[, .(perwt = sum(perwt), cat = c)
+                , .(year, state, category = sel_sel)]
+    setnames(acs_state, 'sel_sel', c)
+    tmp
+  })
 
 acs_state_agg <- do.call('rbind', acs_state_agg)
 acs_state_agg[cat == 'educ_sel', question_id_mapped := '1951']
@@ -261,16 +270,16 @@ ep_priors <- ep_sel_educ[ep_priors]
 # get relative votes by income
 ep_sel_inc <- 
   ep_sel[cat == 'inc_sel', .(state, year, perwt, inc_sel = category
-                              , democrat_cred_inc = democrat_cred / 100
-                              , turnout_inc = votes * total / perwt / 100)]
+                             , democrat_cred_inc = democrat_cred / 100
+                             , turnout_inc = votes * total / perwt / 100)]
 ep_sel_inc[turnout_inc > .99, turnout_inc := .99]
 ep_sel_inc[democrat_cred_inc > .99, democrat_cred_inc := .99]
 ep_sel_inc[, democrat_cred_inc := democrat_cred_inc / 
-              weighted.mean(democrat_cred_inc, turnout_inc * perwt)
-            , .(year, state)]
+             weighted.mean(democrat_cred_inc, turnout_inc * perwt)
+           , .(year, state)]
 ep_sel_inc[, turnout_inc := turnout_inc / 
-              weighted.mean(turnout_inc, perwt)
-            , .(year, state)]
+             weighted.mean(turnout_inc, perwt)
+           , .(year, state)]
 ep_sel_inc[, perwt := NULL]
 
 # adjust white votes by education and income relative vote shares
@@ -284,15 +293,18 @@ ep_priors[race_sel == 'white', democrat_cred :=
             democrat_cred * democrat_cred_inc * democrat_cred_educ]
 ep_priors[race_sel == 'white', turnout := 
             turnout * turnout_inc * turnout_educ]
-ep_priors[turnout > .99, turnout := .99]
-ep_priors[democrat_cred > .99, democrat_cred := .99]
-ep_priors[turnout < .01, turnout := .01]
-ep_priors[democrat_cred < .01, democrat_cred := .01]
+ep_priors[turnout > .92, turnout := .92]
+ep_priors[democrat_cred > .95, democrat_cred := .95]
+ep_priors[turnout < .15, turnout := .15]
+ep_priors[democrat_cred < .05, democrat_cred := .05]
 ep_priors <- 
   ep_priors[, .(year, state, educ_sel, inc_sel, race_sel
                 , wt = perwt * turnout
+                , perwt
                 , turnout,  dem = democrat_cred)]
 ep_priors[, wt := wt / sum(wt), .(state, year)]
+ep_priors[wt < .03 & turnout > .75, turnout := .75]
+ep_priors[wt < .03 & turnout < .15, turnout := .15]
 rm(ep_sel_educ, ep_sel_inc)
 
 # function to fit state model
@@ -313,27 +325,28 @@ f_state_fit <- function(state_sel) {
              & year %in% c(2015, 2012)
              , .(perwt = sum(perwt))
              , .(year, race_sel, inc_sel, educ_sel, county)
-             ][order(year, educ_sel, inc_sel, race_sel, county)]
-  obs <- dcast.data.table(obs, year + county ~ educ_sel + inc_sel + race_sel
-                          , value.var = 'perwt'
-                          , fill = 1)
-  obs <- melt.data.table(obs, id.vars = c('year', 'county')
-                         , value.name = 'perwt'
-                         , variable.name = 'category')
-  obs[perwt < 1, perwt := 1]
-  obs[, perwt := round(perwt)]
-  setkey(obs, year, category, county)
+             ][order(year, race_sel, educ_sel, inc_sel, race_sel, county)]
   
-  theta_prior <- ep_priors[state == state_sel
+  obs_full <- acs[year %in% c(2015, 2012)
+                  , .N, .(year, race_sel, educ_sel, inc_sel)]
+  obs_full <- obs_full[, .(county = obs[, unique(county)])
+                       , .(year, race_sel, educ_sel, inc_sel)]
+  
+  setkey(obs_full, year, race_sel, educ_sel, inc_sel, county)
+  setkey(obs, year, race_sel, educ_sel, inc_sel, county)
+  obs <- obs[obs_full]
+  obs[is.na(perwt) | perwt < 1, perwt := 1]
+  setkey(obs, year, educ_sel, inc_sel, race_sel, county)
+  rm(obs_full)
+  
+  theta_prior <- ep_priors[state == state_sel & year %in% c(2012, 2016)
                            ][order(year, educ_sel, inc_sel, race_sel)
-                           , turnout]
+                             , logit(turnout)]
   
-  theta_prior_votes <- ep_priors[state == state_sel
+  
+  theta_prior_votes <- ep_priors[state == state_sel & year %in% c(2012, 2016)
                                  ][order(year, educ_sel, inc_sel, race_sel)
-                                 , dem]
-
-  
-  
+                                   , logit(dem)]
   
   yr <- 2
   N <- res[state == state_sel & year == 2016, uniqueN(fips)]
@@ -346,10 +359,10 @@ f_state_fit <- function(state_sel) {
   
   # larger prior sd for demographic cells with less population
   obs_pcnt <- apply(obs, c(2, 3), sum) / apply(obs, 3, sum)
-  theta_prior_sd <- ifelse(obs_pcnt < .03,  .2, .1)
-  theta_prior_sd_votes <- ifelse(obs_pcnt < .03,  .2, .1)
+  theta_prior_sd <- ifelse(obs_pcnt < .03,  1, .5)
+  theta_prior_sd_votes <- ifelse(obs_pcnt < .03,  .5, .5)
   
-
+  
   dat <- 
     list(N = N
          , K = K
@@ -365,9 +378,8 @@ f_state_fit <- function(state_sel) {
   rstan_options(auto_write = TRUE)
   options(mc.cores = parallel::detectCores())
   
-  state_fit <- stan(file = 'latent_binomial_approx.stan'
-                    , data = dat, iter = 4000, chains = 4
-                    , control = list(adapt_delta = .9))
+  state_fit <- stan(file = 'latent_binomial_approx1.stan'
+                    , data = dat, iter = 2000, chains = 4)
   
   list(dat = dat, state_fit = state_fit)
 }
@@ -396,9 +408,8 @@ for (s in selected_states) {
   fwrite(tbl,  paste('./Model Fits/', s, '.csv', sep = ''))
   print(s)
   print(fit$state_fit, pars = 'theta_votes_adj[5,2]')
-  rm(tbl2, a, tbl, obs, fit, ep_priors)
+  rm(tbl2, a, tbl, obs, fit)
   gc()
 }
-
 
 
