@@ -4,7 +4,7 @@ library(data.table)
 library(rstan)
 
 # select state
-selected_states <- 'ID'  #setdiff(state.abb, c('HI', 'AK', 'ID', 'AL'))
+selected_states <- setdiff(state.abb, c('AK'))
 
 # directory
 base_directory <- 'C:/data/tmp/exit_polls_2016'
@@ -378,7 +378,7 @@ f_state_fit <- function(state_sel) {
   rstan_options(auto_write = TRUE)
   options(mc.cores = parallel::detectCores())
   
-  state_fit <- stan(file = 'latent_binomial_approx1.stan'
+  state_fit <- stan(file = 'latent_binomial_approx.stan'
                     , data = dat, iter = 2000, chains = 4)
   
   list(dat = dat, state_fit = state_fit)
@@ -404,11 +404,18 @@ for (s in selected_states) {
   setkey(obs, param, yr)
   setkey(tbl, param, yr)
   tbl <- obs[tbl]
+  priors <- 
+    data.table(melt(fit$dat$theta_prior)
+               , theta_prior_sd = array(fit$dat$theta_prior_sd)
+               , theta_prior_votes = array(fit$dat$theta_prior_votes)
+               , theta_prior_sd_votes = array(fit$dat$theta_prior_sd_votes))
+  setnames(priors, 1:3, c('param', 'yr', 'theta_prior'))
   save(fit, file = paste('./Model Fits/', s, '.rdata', sep = ''))
   fwrite(tbl,  paste('./Model Fits/', s, '.csv', sep = ''))
+  fwrite(priors,  paste('./Model Fits/', s, '_prior.csv', sep = ''))
   print(s)
   print(fit$state_fit, pars = 'theta_votes_adj[5,2]')
-  rm(tbl2, a, tbl, obs, fit)
+  rm(tbl2, a, tbl, obs, fit, priors)
   gc()
 }
 
