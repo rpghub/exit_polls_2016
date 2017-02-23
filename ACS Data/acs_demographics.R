@@ -1,16 +1,17 @@
-
 ### import ipums data
 
 library(data.table)
 library(LaF)
 
-base_directory <- 'C:/Projects/Post Election/exit_polls_2016'
+# file patsh
+base_directory <- 'C:/DATA/tmp/exit_polls_2016' #'C:/DATA/tmp/extracts/New folder'
+acs_loc <- './ACS Data'
+cross_loc <- './ACS Data/Crosswalks'
+census_loc <- './Census Data'
 
-
+# load acs data
 setwd(base_directory)
-setwd('./ACS Data')
-
-
+setwd(acs_loc)
 
 dat <- 
   laf_open_fwf('usa_00005.dat'
@@ -46,19 +47,22 @@ dat[, statefip := as.character(statefip)]
 dat[nchar(statefip) == 1, statefip := paste('0', statefip, sep = '')]
 dat[, acs_id := seq_len(.N)]
 
-setwd('./crosswalks')
+# crosswalk pumas
+setwd(base_directory)
+setwd(cross_loc)
 puma00 <- fread('puma2000_county2010.csv')
 puma00 <- puma00[-1]
 puma00[, pop10 := as.numeric(pop10)]
 puma00[, afact := as.numeric(afact)]
-
 
 puma12 <- fread('puma2012_county2010.csv')
 puma12 <- puma12[-1]
 puma12[, pop10 := as.numeric(pop10)]
 puma12[, afact := as.numeric(afact)]
 
-setwd('C:/DATA/tmp/extracts/census')
+# get county data
+setwd(base_directory)
+setwd(census_loc)
 census <- fread('county_quickfacts.csv')
 census[, fips := paste(state_fips, county_fips, sep = '')]
 census[field_resp == 'white', race_sel := 'white']
@@ -90,7 +94,7 @@ dat[puma %in% c('01801', '01802', '01905') & statefip == '22'
 
 
 # collapse acs data to puma level
-dat[, educ_sel := 1 * (educ > 9)]
+dat[, educ_sel := 1 * (educ > 7)]
 dat[hispan > 0, race_sel := 'hispanic']
 dat[is.na(race_sel) & race == 1, race_sel := 'white']
 dat[is.na(race_sel) & race == 2, race_sel := 'black']
@@ -107,7 +111,6 @@ acs_puma <-
           , race_sel, citizen = citizen < 3
           , inc_sel
           , year, puma, state = statefip)]
-
 
 # map acs data to county
 puma_join00 <- puma00[, .(year = seq(2005, 2011))
@@ -192,7 +195,8 @@ acs_puma <-
                #, marst_sel
                , educ_sel, race_sel, inc_sel)]
 
-
+setwd(base_directory)
+setwd(acs_loc)
 write.csv(acs_puma, 'acs_county.csv', row.names = FALSE)
 
 
