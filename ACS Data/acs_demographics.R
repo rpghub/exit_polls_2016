@@ -94,7 +94,7 @@ dat[puma %in% c('01801', '01802', '01905') & statefip == '22'
 
 
 # collapse acs data to puma level
-dat[, educ_sel := 1 * (educ > 7)]
+dat[, educ_sel := 1 * (educd %in%  c(81, 101, 114, 115, 116))]
 dat[hispan > 0, race_sel := 'hispanic']
 dat[is.na(race_sel) & race == 1, race_sel := 'white']
 dat[is.na(race_sel) & race == 2, race_sel := 'black']
@@ -197,6 +197,6 @@ acs_puma <-
 
 setwd(base_directory)
 setwd(acs_loc)
-write.csv(acs_puma, 'acs_county.csv', row.names = FALSE)
+fwrite(acs_puma, 'acs_county.csv', row.names = FALSE)
 
 
