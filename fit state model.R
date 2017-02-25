@@ -4,7 +4,7 @@ library(data.table)
 library(rstan)
 
 # select state
-selected_states <- setdiff(state.abb, c('AK'))
+selected_states <-  setdiff(state.abb, c('AK', 'HI'))
 
 # directory
 base_directory <- 'C:/data/tmp/exit_polls_2016'
@@ -239,6 +239,16 @@ ep_sel[, votes_total := votes * total / 100]
 ep_sel[votes_total > perwt, votes_total := perwt]
 ep_sel[, votes_dem := votes_total * democrat_cred / 100]
 
+# output support files
+setwd(base_directory)
+setwd('./county results')
+fwrite(res, 'combined county results.csv', row.names = FALSE)
+
+setwd(base_directory)
+setwd('./exit polls')
+fwrite(ep_sel, 'selected exit polls.csv', row.names = FALSE)
+
+
 # priors base on race adjusted for education and income
 ep_priors <- 
   ep_sel[cat == 'race_sel', .(state, year, race_sel = category
@@ -410,6 +420,7 @@ for (s in selected_states) {
                , theta_prior_votes = array(fit$dat$theta_prior_votes)
                , theta_prior_sd_votes = array(fit$dat$theta_prior_sd_votes))
   setnames(priors, 1:3, c('param', 'yr', 'theta_prior'))
+  priors[, state := s]
   save(fit, file = paste('./Model Fits/', s, '.rdata', sep = ''))
   fwrite(tbl,  paste('./Model Fits/', s, '.csv', sep = ''))
   fwrite(priors,  paste('./Model Fits/', s, '_prior.csv', sep = ''))
@@ -418,5 +429,3 @@ for (s in selected_states) {
   rm(tbl2, a, tbl, obs, fit, priors)
   gc()
 }
-
-

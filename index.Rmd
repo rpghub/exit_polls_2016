@@ -1,0 +1,743 @@
+---
+title: "Exit Polls 2016"
+author: "Ryan Purcell"
+date: "February 19, 2017"
+fontsize: 12pt
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r , include=FALSE}
+library(data.table)
+library(ggplot2)
+library(mapproj)
+library(maps)
+library(knitr)
+library(grid)
+
+# directory
+base_directory <- 'C:/data/tmp/exit_polls_2016'
+
+# file paths
+model_loc <- './Model Fits'
+acs_loc <- './ACS Data'
+exit_polls_loc <- './exit polls'
+results_loc <- './county results'
+
+# load datac
+setwd(base_directory)
+setwd(model_loc)
+f <- list.files()
+f_prior <- f[grepl('_prior.csv', f)]
+f <- setdiff(f, f_prior)
+f_fit <- f[grepl('.csv', f)]
+fit <- do.call('rbind', lapply(f_fit, fread))
+fit <- fit[state != 'HI']
+prior <- do.call('rbind', lapply(f_prior, fread))
+setwd(base_directory)
+setwd(exit_polls_loc)
+ep_sel <- fread('selected exit polls.csv')
+setwd(base_directory)
+setwd(results_loc)
+res <- fread('combined county results.csv')
+setwd(base_directory)
+setwd(acs_loc)
+acs <- fread('acs_county.csv', colClasses = 'char')
+acs[, perwt := as.numeric(perwt) / 100]
+acs[, educ_sel := as.integer(educ_sel)]
+acs[, year := as.integer(year)]
+rm(f, f_fit, f_prior, acs_loc, exit_polls_loc, results_loc)
+
+# adjust for bedford county city which changed fips
+tmp <-
+  acs[county %in% c('51515', '51019')
+      , .(perwt = sum(perwt)
+          , cntyname = 'Bedford VA'
+          , county = '51019')
+      , .(state, year, educ_sel, race_sel, inc_sel)]
+acs <- rbind(acs[!(county %in% c('51515', '51019'))], tmp)
+rm(tmp)
+
+# define inv-logit function
+inv_logit <- function(x) 1 / (1 + exp(-x))
+logit <- function(x) log(x / (1 - x))
+
+# add labels to fits
+lab_dat <- data.table(race_sel = c('asian', 'black', 'latino', 'other', 'white'))
+lab_dat <- lab_dat[, .(educ_sel = c(0, 1)), race_sel]
+lab_dat <- lab_dat[, .(inc_sel = c(0, 1)), .(educ_sel, race_sel)]
+lab_dat <- lab_dat[, .(yr = c(2012, 2016)), .(inc_sel, educ_sel, race_sel)]
+lab_dat <- lab_dat[order(yr, educ_sel, inc_sel, race_sel)]
+lab_dat[, param := seq(1, 20)]
+fit[, yr := ifelse(yr == 1, 2012, 2016)]
+setkey(fit, yr, param)
+setkey(lab_dat, yr, param)
+fit <- lab_dat[fit]
+rm(lab_dat)
+
+# add simulations based on priors to fit
+prior[, yr := ifelse(yr == 1, 2012, 2016)]
+setkey(prior, yr, param, state)
+setkey(fit, yr, param, state)
+fit <- prior[fit]
+fit[, theta_adj_prior := inv_logit(rnorm(.N, theta_prior, theta_prior_sd))]
+fit[, theta_votes_adj_prior := inv_logit(rnorm(.N, theta_prior_votes
+                                               , theta_prior_sd_votes))]
+cols <- c('theta_prior', 'theta_prior_sd', 'theta_prior_votes'
+          , 'theta_prior_sd_votes')
+fit[, (cols) := NULL]
+rm(cols)
+
+# add region to fit data
+region_cross <- data.table(state = state.abb, region = state.region)
+setkey(region_cross, state)
+setkey(fit, state)
+fit <- region_cross[fit]
+
+# function to get data by agg
+f_agg <- function(by_region = FALSE) {
+  if (by_region == TRUE) {
+    fit[, geo := region]
+  } else {
+    fit[, geo := state]
+  }
+
+  tmp <- 
+    fit[, .(votes = weighted.mean(theta_votes_adj, theta_adj * perwt)
+            , turnout = weighted.mean(theta_adj, perwt)
+            , votes_prior = weighted.mean(theta_votes_adj_prior
+                                          , theta_adj_prior * perwt)
+            , turnout_prior = weighted.mean(theta_adj_prior, perwt)
+            , perwt = sum(theta_adj * perwt)
+            , perwt_prior =  sum(theta_adj_prior * perwt))
+        , .(yr, geo, iterations, grp)
+        ][, .(grp, votes, turnout, votes_prior, turnout_prior
+              , perwt, pcnt = perwt / sum(perwt)
+              , pcnt_prior = perwt_prior / sum(perwt_prior))
+          , .(yr, geo, iterations)]
+  fit[, geo := NULL]
+  tmp12 <- tmp[yr == 2012]
+  tmp16 <- tmp[yr == 2016]
+  setkey(tmp12, grp, geo, iterations)
+  setkey(tmp16, grp, geo, iterations)
+  tmp_comb <- tmp12[tmp16]
+  tmp_comb <- tmp_comb[, .(grp, geo, iterations
+                           , perwt = i.perwt - perwt
+                           , votes = i.votes - votes
+                           , turnout = i.turnout - turnout
+                           , votes_prior = i.votes_prior - votes_prior
+                           , turnout_prior = i.turnout_prior - turnout_prior
+                           , pcnt_prior = i.pcnt_prior - pcnt_prior
+                           , pcnt = i.pcnt - pcnt
+                           , yr = 'change')]
+  tmp <- rbind(tmp, tmp_comb)
+  rm(tmp_comb, tmp12, tmp16)
+  tmp <- 
+    tmp[, .(votes_mean = mean(votes)
+                  , votes_95 = quantile(votes, .975)
+                  , votes_05 = quantile(votes, .025)
+                  , turnout_mean = mean(turnout)
+                  , turnout_95 = quantile(turnout, .975)
+                  , turnout_05 = quantile(turnout, .025)
+                  , votes_prior_mean = mean(votes_prior)
+                  , votes_prior_95 = quantile(votes_prior, .975)
+                  , votes_prior_05 = quantile(votes_prior, .025)
+                  , turnout_prior_mean = mean(turnout_prior)
+                  , turnout_prior_95 = quantile(turnout_prior, .975)
+                  , turnout_prior_05 = quantile(turnout_prior, .025)
+                  , pcnt_mean = mean(pcnt, na.rm = TRUE)
+                  , pcnt_95 = quantile(pcnt, .975)
+                  , pcnt_05 = quantile(pcnt, .025)
+                  , pcnt_prior_mean = mean(pcnt_prior, na.rm = TRUE)
+                  , pcnt_prior_95 = quantile(pcnt_prior, .975)
+                  , pcnt_prior_05 = quantile(pcnt_prior, .025))
+              , .(yr, geo, grp)
+              ][order(yr, geo, grp)]
+  if (by_region == TRUE) {
+    setnames(tmp, 'geo', 'region')
+  } else {
+    setnames(tmp, 'geo', 'state')
+  }
+}
+
+# export summary csv
+setwd(base_directory)
+fit[, grp := param]
+plot_dat <- f_agg()
+labs <- unique(fit[, .(param, race_sel, educ_sel, inc_sel)])
+setkey(labs, param)
+setkey(plot_dat, grp)
+plot_dat <- labs[plot_dat]
+fwrite(plot_dat[yr != 'change'], 'summary results.csv', row.names = FALSE)
+
+f_line_plot_hlpr <- function(point, upper, lower, labels
+                             , var
+                             , point_p = NULL
+                             , upper_p = NULL
+                             , lower_p = NULL
+                             , f_wrap = NA
+                             , scales = 'fixed') {
+  if (is.null(point_p)) {
+    tmp <- data.table(point = point, upper = upper, lower = lower
+                           , labels = labels
+                           , y = seq(length(point), 1, -1))
+  } else {
+    tmp <- data.table(point = point, upper = upper, lower = lower
+                           , point_p = point_p, upper_p = upper_p
+                           , lower_p = lower_p
+                           , labels = labels
+                           , y = seq(length(point), 1, -1))
+  }
+
+  if (!is.null(f_wrap)) {
+    tmp[, f_wrap := f_wrap]
+    if (scales != 'free_y') {
+      tmp[, y := seq(.N, 1, -1), f_wrap]
+    } else {
+      tmp[, id := seq_len(.N)]
+      tmp <- tmp[order(f_wrap, id)]
+      tmp[, id := NULL]
+      tmp[, y := seq(length(point), 1, -1)]
+    }
+  }
+  
+  g <-
+    ggplot(tmp, aes(y = y)) +
+      geom_point(aes(x = point)) +
+      geom_segment(data = tmp, aes(x = upper
+                              , xend = lower,
+                              y = y, yend = y
+                              , color = 'Posterior')
+                   , size = 2, alpha = .5) +
+      scale_y_continuous(breaks = tmp$y, labels = tmp$labels,
+                         limits = c(0.5, tmp[, max(y) + .05])) +
+      xlab(var)
+  if (!is.null(tmp$point_p)) {
+    if (tmp$point_p[1] == tmp$lower_p[1]) {
+      g <- g +
+        geom_point(data = tmp, aes(x = point_p, color = 'Exit Poll')
+                   , alpha = .5)
+    } else {
+          g <-
+            g +
+            geom_point(data = tmp, aes(x = point_p), alpha = .3) +
+            geom_segment(data = tmp
+                         , aes(x = upper_p
+                               , xend = lower_p
+                               , y = y, yend = y
+                               , color = 'Prior')
+                         , size = 2, alpha = .3)
+    }
+
+  }
+  
+  if (!is.null(tmp$f_wrap)) {
+    g <- g + facet_wrap(~f_wrap, scales = scales)
+  }
+  
+  g + guides(color = guide_legend(title = ''))
+}
+
+f_line_plot <- function(tbl, var, priors = 1L, f_wrap = NA, scales = 'fixed') {
+  cols <- paste(var, c('_mean', '_95', '_05'
+                       ,'_prior_mean', '_prior_95', '_prior_05'
+                       , '_ep')
+                , sep = '')
+  if (is.null(tbl$labs)) {
+    tbl[, labs := paste(state, grp, sep = ' - ')]
+  }
+
+  if (priors == 1L) {
+    f_line_plot_hlpr(tbl[[cols[1]]]
+                     , tbl[[cols[2]]]
+                     , tbl[[cols[3]]]
+                     , tbl[['labs']]
+                     , var
+                     , tbl[[cols[4]]]
+                     , tbl[[cols[5]]]
+                     , tbl[[cols[6]]]
+                     , f_wrap = tbl[[f_wrap]]
+                     , scales)
+  } else if (priors == 2L) {
+    f_line_plot_hlpr(tbl[[cols[1]]]
+                     , tbl[[cols[2]]]
+                     , tbl[[cols[3]]]
+                     , tbl[['labs']]
+                     , var
+                     , tbl[[cols[7]]]
+                     , tbl[[cols[7]]]
+                     , tbl[[cols[7]]]
+                     , f_wrap = tbl[[f_wrap]]
+                     , scales)
+  } else {
+    f_line_plot_hlpr(tbl[[cols[1]]]
+                     , tbl[[cols[2]]]
+                     , tbl[[cols[3]]]
+                     , tbl[['labs']]
+                     , var
+                     , f_wrap = tbl[[f_wrap]]
+                     , scales = scales)
+    }
+}
+
+# clean theme for maps
+theme_clean <- function(base_size = 12) {
+  require(grid)
+  theme_grey(base_size) %+replace%
+  theme(
+    axis.title      =   element_blank(),
+    axis.text       =   element_blank(),
+    panel.background    =   element_blank(),
+    panel.grid      =   element_blank(),
+    axis.ticks.length   =   unit(0,"cm"),
+    plot.margin     =   unit(c(0,0,0,0),"lines"),
+    complete = TRUE
+  )
+}
+
+# exit poll data by yr and change
+ep_point <-
+  ep_sel[year %in% c(2012, 2016)
+         , .(state, year, cat, category, democrat = democrat / 100
+             , turnout = votes_total / perwt
+             , pcnt = total / 100)]
+ep_point12 <- ep_point[year == 2012]
+ep_point16 <- ep_point[year == 2016]
+setkey(ep_point12, state, cat, category)
+setkey(ep_point16, state, cat, category)
+ep_point_comb <- ep_point12[ep_point16]
+ep_point_comb <-
+  ep_point_comb[, .(state, year = 'change'
+                    , cat, category, democrat = i.democrat - democrat
+                    , turnout = i.turnout - turnout
+                    , pcnt = i.pcnt - pcnt)]
+ep_point <- rbind(ep_point, ep_point_comb)
+setnames(ep_point, c('category', 'year'), c('grp', 'yr'))
+rm(ep_point12, ep_point16, ep_point_comb)
+
+# ggplot2 colors
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+```
+
+General election results by demographic groups such as race, education attainment and income level are not available for most states. Exit polls are the most available data source for demographic level data, but their results are not always [accurate](https://academic.oup.com/poq/article/71/4/588/1822767/The-True-ElectorateA-Cross-Validation-of-Voter). As an alternative, I have created a hierarchical Bayesian model to estimate turnout and voter preferences by demographic group for each state. I use county level election results and census data to fit the model. The model code and data can be found [here](https://github.com/rpghub/exit_polls_2016).
+
+This page is arranged in three sections. First, the results of the model are shown graphically. Second, more detailed results for the sate of Georgia are presented, and actual voter turnout results by race are compared to the model fitted values. Third, the structure of the model is shown in more detail.  
+
+# Model Results
+
+Below are point estimates and 95% confidence intervals for voter turnout and Democrat vote shares for the lower 48 states. Estimates are shown for selected demographic groups. The exit poll point estimates are also shown where available.
+
+```{r, include = FALSE}
+fit[, grp := race_sel]
+plot_dat <- f_agg()[order(yr, state)]
+plot_dat[, labs := state]
+
+ep_point_race <- ep_point[cat == 'race_sel']
+setkey(plot_dat, yr, state, grp)
+setkey(ep_point_race, yr, state, grp)
+plot_dat <- 
+  ep_point_race[, .(yr, state, grp, votes_ep = democrat, turnout_ep = turnout)
+                ][plot_dat]
+plot_dat <- plot_dat[order(state)]
+
+white_turnout <- 
+  f_line_plot(plot_dat[grp == 'white'][order(state, yr)]
+              , 'turnout', priors = 2, f_wrap = 'yr'
+              , scales = 'free_x') + 
+  ggtitle('Voter Turnout for White Voters') +
+  scale_color_manual(breaks = c('Posterior', 'Exit Poll')
+                     , values = rev(gg_color_hue(2))) + 
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+white_votes <- 
+  f_line_plot(plot_dat[grp == 'white'][order(state, yr)]
+              , 'votes', priors = 2, f_wrap = 'yr'
+              , scales = 'free_x') + 
+  ggtitle('Democrat Vote Share for White Voters') +
+  scale_color_manual(breaks = c('Posterior', 'Exit Poll')
+                     , values = rev(gg_color_hue(2))) + 
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+black_turnout <- 
+  f_line_plot(plot_dat[grp == 'black'][order(state, yr)]
+              , 'turnout', priors = 2, f_wrap = 'yr'
+              , scales = 'free_x') + 
+  ggtitle('Voter Turnout for Black Voters') +
+  scale_color_manual(breaks = c('Posterior', 'Exit Poll')
+                     , values = rev(gg_color_hue(2))) + 
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+black_votes <- 
+  f_line_plot(plot_dat[grp == 'black'][order(state, yr)]
+              , 'votes', priors = 2, f_wrap = 'yr'
+              , scales = 'free_x') + 
+  ggtitle('Democrat Vote Share for Black Voters') +
+  scale_color_manual(breaks = c('Posterior', 'Exit Poll')
+                     , values = rev(gg_color_hue(2))) + 
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+fit[, grp := as.character(educ_sel)]
+plot_dat <- f_agg()[order(yr, state)]
+plot_dat[, labs := state]
+
+ep_point_race <- ep_point[cat == 'educ_sel']
+setkey(plot_dat, yr, state, grp)
+setkey(ep_point_race, yr, state, grp)
+plot_dat <- 
+  ep_point_race[, .(yr, state, grp, votes_ep = democrat, turnout_ep = turnout)
+                ][plot_dat]
+plot_dat <- plot_dat[order(state)]
+
+no_college_turnout <- 
+  f_line_plot(plot_dat[grp == 0][order(state, yr)]
+              , 'turnout', priors = 2, f_wrap = 'yr'
+              , scales = 'free_x') + 
+  ggtitle('Turnout for Voters without a College Degree') +
+  scale_color_manual(breaks = c('Posterior', 'Exit Poll')
+                     , values = rev(gg_color_hue(2))) + 
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+no_college_turnout <- 
+  f_line_plot(plot_dat[grp == 0][order(state, yr)]
+              , 'turnout', priors = 2, f_wrap = 'yr'
+              , scales = 'free_x') + 
+  ggtitle('Turnout for Voters without a College Degree') +
+  scale_color_manual(breaks = c('Posterior', 'Exit Poll')
+                     , values = rev(gg_color_hue(2))) + 
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+no_college_votes <- 
+  f_line_plot(plot_dat[grp == 0][order(state, yr)]
+              , 'votes', priors = 2, f_wrap = 'yr'
+              , scales = 'free_x') + 
+  ggtitle('Democrat Vote Share for Voters without a College Degree') +
+  scale_color_manual(breaks = c('Posterior', 'Exit Poll')
+                     , values = rev(gg_color_hue(2))) + 
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+college_turnout <- 
+  f_line_plot(plot_dat[grp == 1][order(state, yr)]
+              , 'turnout', priors = 2, f_wrap = 'yr'
+              , scales = 'free_x') + 
+  ggtitle('Turnout for Voters with a College Degree') +
+  scale_color_manual(breaks = c('Posterior', 'Exit Poll')
+                     , values = rev(gg_color_hue(2))) + 
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+
+
+```
+
+```{r, echo = FALSE, fig.height = 11, fig.width = 8}
+suppressWarnings(print(white_turnout))
+suppressWarnings(print(white_votes))
+suppressWarnings(print(black_turnout))
+suppressWarnings(print(black_votes))
+suppressWarnings(print(no_college_turnout))
+suppressWarnings(print(no_college_votes))
+```
+
+Regional estimates for race and education combined
+
+```{r, include = FALSE}
+fit[, grp := race_sel]
+fit[grp == 'white' & educ_sel == 1, grp := 'White with College Degree']
+fit[grp == 'white' & educ_sel == 0, grp := 'White without College Degree']
+plot_dat <- f_agg(by_region = TRUE)
+plot_dat[, labs := grp]
+
+region_turnout <- 
+  f_line_plot(plot_dat[yr == '2016']
+              , 'turnout', priors = 0, f_wrap = 'region'
+              , scales = 'fixed') + 
+  ggtitle('2016 Turnout by Race and Education') +
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  guides(color = FALSE)
+
+region_votes <- 
+  f_line_plot(plot_dat[yr == '2016']
+              , 'votes', priors = 0, f_wrap = 'region'
+              , scales = 'fixed') + 
+  ggtitle('2016 Democrat Vote Share by Race and Education') +
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  guides(color = FALSE)
+
+region_turnout_chng <- 
+  f_line_plot(plot_dat[yr == 'change']
+              , 'turnout', priors = 0, f_wrap = 'region'
+              , scales = 'fixed') + 
+  ggtitle('2012 to 2016 Change in Turnout by Race and Education') +
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  guides(color = FALSE)
+
+region_votes_chng <- 
+  f_line_plot(plot_dat[yr == 'change']
+              , 'votes', priors = 0, f_wrap = 'region'
+              , scales = 'fixed') + 
+  ggtitle('2012 to 2016 Change in Democrat Vote Share by Race and Education') +
+  xlab('') + ylab('') + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  guides(color = FALSE)
+```
+
+```{r, echo = FALSE}
+suppressWarnings(print(region_turnout))
+suppressWarnings(print(region_votes))
+suppressWarnings(print(region_turnout_chng))
+suppressWarnings(print(region_votes_chng))
+```
+
+# Single State Example
+
+This section presents more detailed results for the state of Georgia. I chose Georgia because Georgia's Secretary of State [released](http://sos.ga.gov/index.php/elections/general_election_turnout_by_demographics_november_2016) vote totals by race for the 2016 general election. This allows for comparison between the model results and the true values.
+
+Below is a table showing the percentage breakdown of total votes by race for Georgian in the 2016 general election. The exit poll and model estimates are shown as well as the actual values based on the Secretary of State's report. The exit poll significantly underestimates the share of white voters. The model is closer to the actual values, but it also underestimates the white share slightly. The graph following the table shows the same data along with the uncertainty of the model. The true percentages for both white and asian voters are slightly outside of the confidence intervals.
+
+```{r, include = FALSE}
+tbl_dat <-
+  ep_point[state == 'GA' & cat == 'race_sel' & yr == 2016
+       , .(state
+           , yr = as.character(yr)
+           , grp
+           , pcnt_ep = pcnt
+           , votes_ep = democrat
+           , turnout_ep = turnout)]
+
+fit[, grp := race_sel]
+plot_dat <- f_agg()[order(yr, state)]
+setkey(tbl_dat, yr, state, grp)
+setkey(plot_dat, yr, state, grp)
+tbl_dat <- plot_dat[tbl_dat]
+tbl_dat[, pcnt_voter_true := c(1.71, 29.57, 2.27, 1.18, 65.27)]
+```
+
+```{r, echo = FALSE}
+# table of georgia results
+kable(tbl_dat[, .(grp, pcnt_ep * 100
+                  , pcnt_mean * 100
+                  , pcnt_voter_true)]
+      , digits = 1
+      , align = 'c'
+      , col.names = c('Race', 'Exit Polls', 'Model', 'Actual')
+      , caption = 'Georgia Percent of Total Votes by Race')
+```
+
+```{r, include = FALSE}
+# graphical georgia results with uncertainty
+tbl_dat[, labs := grp]
+ga <- 
+  f_line_plot(tbl_dat, 'pcnt', priors = 0) +
+  geom_point(data = tbl_dat, aes(x = pcnt_ep, y = 5:1
+                                 , color = 'Exit Poll')) +
+  geom_point(data = tbl_dat, aes(x = pcnt_voter_true / 100
+                                 , y = 5:1, color = 'True Value')) +
+  xlab('Percent of Total Votes') + ylab('') +
+  ggtitle('Georgia Percent of Total Votes by Race') +
+  scale_color_manual(values = c('Posterior' = gg_color_hue(3)[1]
+                                , 'True Value' = gg_color_hue(3)[2]
+                                , 'Exit Poll' = gg_color_hue(3)[3])
+                     , labels = c('Exit Poll', 'Model', 'True Value')) + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+```{r, echo = FALSE}
+print(ga)
+```
+
+Total results by county are used to fit the model. The model uses differences in demographic makeup of each county (derived from census data) to estimate turnout and Democratic vote shares by demographic groups. Specifically, the model estimates the turnout and Democratic vote share for every combination of race, college graduation, and family income of more than $100k, which results in 20 demographic "cells" (5 x 2 x 2). 
+
+The maps below show the demographic groups' share of the county voting age population. 
+
+```{r, include = FALSE}
+# acs county names
+acs[, state := substr(cntyname, nchar(cntyname) - 1, nchar(cntyname))]
+acs[, cntyname := tolower(substr(cntyname, 1, nchar(cntyname) - 3))]
+
+# read map data and merge to acs
+county_map <- map_data('county')
+county_map <- as.data.table(county_map)
+
+# state crosswalk
+state_cross <- data.table(state = tolower(state.name)
+                          , state_abb = state.abb)
+state_cross <- rbind(state_cross
+                     , data.table(state = 'district of columbia'
+                                  , state_abb = 'DC'))
+
+# add state abbr to county map data
+county_map[, year := 2015]
+setkey(county_map, region)
+setkey(state_cross, state)
+county_map <- state_cross[county_map]
+
+# add race pcnt by county
+acs_race <- acs[, .(perwt = sum(perwt))
+                , .(year, state, county, cntyname
+                    , race_sel = ifelse(race_sel %in% c('asian', 'hispanic', 'other')
+                                        , 'all other non-white and non-black'
+                                        , race_sel))]
+acs_race[, pcnt := perwt / sum(perwt), .(state, year, county)]
+acs_race[cntyname == 'dekalb', cntyname := 'de kalb']
+
+setkey(acs_race, year, state, cntyname)
+setkey(county_map, year, state_abb, subregion)
+county_map_race <- acs_race[county_map, allow.cartesian = TRUE]
+county_map_race[, i.state := NULL]
+
+ga_map_race <-
+  ggplot(county_map_race[state == 'GA']
+         , aes(x = long, y = lat, group = group, fill = pcnt)) +
+  geom_polygon() +
+  coord_map('polyconic') +
+  geom_path(color = 'black') +
+  facet_wrap(~race_sel) +
+  theme_clean() +
+  theme(legend.position="bottom") +
+  scale_fill_continuous(name = '')
+
+# add educ pcnt by county
+acs_educ <- 
+  acs[, .(perwt = sum(perwt))
+      , .(year, state, county, cntyname
+          , educ_sel = ifelse(educ_sel == 1, 'College Graduate'
+                              , 'Non College Graduate'))]
+acs_educ[, pcnt := perwt / sum(perwt), .(state, year, county)]
+acs_educ[cntyname == 'dekalb', cntyname := 'de kalb']
+
+setkey(acs_educ, year, state, cntyname)
+setkey(county_map, year, state_abb, subregion)
+county_map_educ <- acs_educ[county_map, allow.cartesian = TRUE]
+county_map_educ[, i.state := NULL]
+
+ga_map_educ <-
+  ggplot(county_map_educ[state == 'GA']
+         , aes(x = long, y = lat, group = group, fill = pcnt)) +
+  geom_polygon() +
+  coord_map('polyconic') +
+  geom_path(color = 'black') +
+  facet_wrap(~educ_sel) +
+  theme_clean() +
+  theme(legend.position="bottom") +
+  scale_fill_continuous(name = '')
+
+# add income pcnt by county
+acs_inc <- 
+  acs[, .(perwt = sum(perwt))
+      , .(year, state, county, cntyname
+          , inc_sel = ifelse(inc_sel == 1, '$100k or More'
+                              , 'Less than $100k'))]
+acs_inc[, pcnt := perwt / sum(perwt), .(state, year, county)]
+acs_inc[cntyname == 'dekalb', cntyname := 'de kalb']
+
+setkey(acs_inc, year, state, cntyname)
+setkey(county_map, year, state_abb, subregion)
+county_map_inc <- acs_inc[county_map, allow.cartesian = TRUE]
+county_map_inc[, i.state := NULL]
+
+ga_map_inc <-
+  ggplot(county_map_inc[state == 'GA']
+         , aes(x = long, y = lat, group = group, fill = pcnt)) +
+  geom_polygon() +
+  coord_map('polyconic') +
+  geom_path(color = 'black') +
+  facet_wrap(~inc_sel) +
+  theme_clean() +
+  theme(legend.position="bottom") +
+  scale_fill_continuous(name = '')
+  
+
+```
+
+```{r, echo = FALSE}
+print(ga_map_race)
+print(ga_map_educ)
+print(ga_map_inc)
+```
+
+
+
+```{r, include = FALSE}
+fit[, grp := paste(race_sel
+                   , ifelse(educ_sel == 1, 'w degree', 'no degree')
+                   , ifelse(inc_sel == 1, '$100k+', 'under $100k')
+                   , sep = ' - ')]
+plot_dat <- f_agg()
+plot_dat_long <-
+  rbind(
+    plot_dat[, .(yr, state, grp, variable = 'Democratic Vote Share'
+                 , value_mean = votes_mean, value_05 = votes_05
+                 , value_95 = votes_95)]
+    , plot_dat[, .(yr, state, grp, variable = 'Percent of Total Votes'
+                   , value_mean = pcnt_mean, value_05 = pcnt_05
+                   , value_95 = pcnt_95)]
+    , plot_dat[, .(yr, state, grp, variable = 'Turnout Rate'
+                   , value_mean = turnout_mean, value_05 = turnout_05
+                   , value_95 = turnout_95)]
+  )
+plot_dat_long[, labs := grp]
+
+ga_all <- 
+  f_line_plot(plot_dat_long[state == 'GA' & yr == 2016]
+              , 'value', priors = 0L
+              , f_wrap = 'variable', scales = 'free_x') +
+   ylab('') + xlab('') + guides(color = FALSE)
+
+```
+
+The model values for each demographic group are shown below. The smaller demographic groups have very wide confidence intervals as there is not very much data from the county level results to estimate the values from. The model uses exit poll data to set the prior means for each demographic group. This means that in the absence of information to contradict the exit polls, the model estimates will be close to the exit poll estimates.
+
+```{r, echo = FALSE, fig.height = 8}
+print(ga_all)
+```
+
+# Model Details
+
+The model is a Bayesian hierarchical model fit using [Stan](http://mc-stan.org/). A separate model is fit to each state and year (note that the code fits multiple years at the same time, but each year is treated as being completely independent). County level election results are the observed outcomes that the model fits, and the demographic makeups of each county, from census data, are the predictors. 
+
+For each county, $i$, the total votes, $y_i^{tot}$ and Democratic votes $y_i^{dem}$, are assumed to be the sum of votes from each demographic group, $j$ within the county. 
+$$y_{i}^{tot} = \sum_{j=1}^Jy_{ij}^{tot}$$
+$$y_{i}^{dem} = \sum_{j=1}^Jy_{ij}^{dem}$$
+
+The number of votes for each demographic group within each county is assumed to be binomial based on the total population of the demographic group, $N_{ij}$ and the inverse logit transform of a parameter, $\theta_{ij}^{tot}$, which varies by demographic group and county. Similarly, the Democratic votes for each demographic group, conditional on the total votes, are binomial based on the $y_{ij}^{tot}$ total votes and the inverse logit transform of a parameter $\theta_{ij}^{dem}$. The $\theta_{ij}^{tot}$ and $\theta_{ij}^{dem}$ parameters are assumed to come from normal distributions centered on the means (on the logistic scale) for the demographic groups, $\alpha_{j}^{tot}$ and $\alpha_{j}^{dem}$. 
+$$\theta_{ij}^{tot} \sim Normal(\alpha_{j}^{tot}, .5)$$
+$$\theta_{ij}^{dem} \sim Normal(\alpha_{j}^{dem}, .5)$$
+and
+$$y_{ij}^{tot} \sim Binomial(N_{ij}, inv\_logit(\theta_{ij}^{tot}))$$
+$$y_{ij}^{dem} \sim Binomial(y_{ij}^{tot}, inv\_logit(\theta_{ij}^{dem}))$$
+
+The $y_{ij}^{tot}$ and $y_{ij}^{dem}$ values, however, are not actually available, only the county level sums $y_{i}^{tot}$ and $y_{i}^{dem}$ are known. The $y_{i}^{tot}$ and $y_{i}^{dem}$ are assumed to be the sum of independent binomialy distributed values. For $y_{i}^{tot}$, if the binomials are approximated by normal distributions with means $inv\_logit(\theta_{ij}^{tot}) \cdot N_{ij}$ and variances $N_{ij} \cdot inv\_logit(\theta_{ij}^{tot}) \cdot (1 - inv\_logit(\theta_{ij}^{tot}))$, then $y_{i}^{tot}$ is the sum of independent normals, which is itself is normal. 
+$$y_{i}^{tot} \sim Normal(\sum_{j=1}^{J}\mu_{ij}^{tot}, \sum_{j}\sigma_{ij}^{tot})$$
+where 
+$$\mu_{ij}^{tot} = inv\_logit(\theta_{ij}^{tot}) \cdot N_{ij}$$
+$$\sigma_{ij}^{tot} = \sqrt{N_{ij} \cdot inv\_logit(\theta_{ij}^{tot}) \cdot (1 - inv\_logit(\theta_{ij}^{tot})}$$
+Similarly $y_{i}^{dem}$ can be thought of as the sum or independent normals conditional on the values of the $\mu_{ij}^{tot}$.
+
+$$y_{i}^{dem} | u_{i1}^{tot}...u_{iJ}^{tot} \sim Normal(\sum_{j=1}^{J}\mu_{ij}^{dem}, \sum_{j}\sigma_{ij}^{dem})$$
+where 
+$$\mu_{ij}^{dem} = inv\_logit(\theta_{ij}^{dem}) \cdot \mu_{ij}^{tot}$$
+$$\sigma_{ij}^{dem} = \sqrt{mu_{ij}^{tot} \cdot inv\_logit(\theta_{ij}^{dem}) \cdot (1 - inv\_logit(\theta_{ij}^{dem})}$$
+To finalize the model, $\alpha_{j}^{tot}$ and $\alpha_{j}^{dem}$ both have normal prior distributions with means derived from exit poll data and wide standard deviations.
+
+The model allows the parameters $\theta_{ij}^{tot}$ and $\theta_{ij}^{dem}$ to vary by county, but the real parameters of interest are the statewide turnout percentages and Democratic vote shares by demographic group. These are estimated as follows.  
+$$\theta_{j}^{tot-adj} = \frac{\sum_{i=1}^{I} \theta_{ij}^{tot} \cdot N_{ij}}{\sum_{i=1}^{I} N_{ij}}$$
+$$\theta_{j}^{dem-adj} = \frac{\sum_{i=1}^{I} \theta_{ij}^{dem} \cdot \theta_{ij}^{tot} \cdot N_{ij}}{\sum_{i=1}^{I} \theta_{ij}^{tot} \cdot N_{ij}}$$

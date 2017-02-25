@@ -10,6 +10,8 @@ data {
   real theta_prior_votes[K, Yr];
   real<lower=0> theta_prior_sd_votes[K, Yr];
 } transformed data {
+  // standard deviations are fixed and calculated based on the prior distributions
+  // in order to increase the speed and stability of the model.
   real<lower=0> sigma[N, K, Yr];
   real<lower=0> sigma_sum[N, Yr];
   real<lower=0> sigma_votes[N, K, Yr];
@@ -29,11 +31,11 @@ data {
                                      * inv_logit(theta_prior_votes[k, yr]) 
                                      * (1 - inv_logit(theta_prior_votes[k, yr])));
         sigma_sum_votes[n, yr] = sigma_sum_votes[n, yr] + square(sigma_votes[n, k, yr]);
-        }
-    sigma_sum[n, yr] = sqrt(sigma_sum[n, yr]) * 10;
-    sigma_sum_votes[n, yr] = sqrt(sigma_sum_votes[n, yr]) * 10;
+      }
+      // increasing the standard deviations speeds convergence
+      sigma_sum[n, yr] = sqrt(sigma_sum[n, yr]) * 5;
+      sigma_sum_votes[n, yr] = sqrt(sigma_sum_votes[n, yr]) * 5;
     }
-    
   }
 }
 parameters {
